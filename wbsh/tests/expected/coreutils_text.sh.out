@@ -2,7 +2,7 @@
 one
 two
 three
-
+--
      1	one
      2	two
 === head / tail
@@ -16,21 +16,21 @@ three
 8
 9
 10
-
+--
 1
 2
 3
-
+--
 8
 9
 10
 === wc
 2 5 24
-
+--
 2
-
+--
 5
-
+--
 24
 === basename / dirname
 c.txt
@@ -43,7 +43,7 @@ slong
 textf
 orfol
 ding
-
+--
 alpha 
 beta 
 gamma 
@@ -55,7 +55,7 @@ a
 		b
 		c
 	d
-
+--
 		b
 		c
 === nl numbering

@@ -15,4 +15,9 @@ namespace wbsh {
 	/// wrapper) and appends to `out`. False on malformed input.
 	bool inflateRaw(const std::uint8_t* in, std::size_t in_len, std::vector<std::uint8_t>& out);
 
+	/// inflateRaw that also adds the number of input bytes the stream took,
+	/// through its final block's last partial byte, to @p consumed.
+	bool inflateRawConsumed(const std::uint8_t* in, std::size_t in_len,
+	                        std::vector<std::uint8_t>& out, std::size_t& consumed);
+
 }  // namespace wbsh

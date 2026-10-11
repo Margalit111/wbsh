@@ -1,5 +1,5 @@
 #!/bin/bash
-# Smoke test for sed (wbsh's sed currently supports s/PAT/REPL/[g] only).
+# Smoke test for sed substitution; the wider command set is in busybox_text.sh.
 
 echo "=== substitution (single)"
 echo "hello world" | sed 's/world/wbsh/'

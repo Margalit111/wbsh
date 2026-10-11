@@ -200,8 +200,10 @@ namespace wbsh {
 		return decodeBlockCodes(stream, length_table, dist_table);
 	}
 
-	static void repeatLength(short* lengths, int& index, short value, int times) {
+	static bool repeatLength(short* lengths, int& index, int total, short value, int times) {
+		if (index + times > total) return false;
 		for (int k = 0; k < times; ++k) lengths[index++] = value;
+		return true;
 	}
 
 	static bool readDynamicLengths(BitStream& stream, const Huffman& code_table,
@@ -213,17 +215,29 @@ namespace wbsh {
 
 			if (symbol < 16) {
 				lengths[index++] = static_cast<short>(symbol);
-			} else if (symbol == 16) {
-				if (index == 0) return false;
-				repeatLength(lengths, index, lengths[index - 1], stream.bits(2) + 3);
-			} else if (symbol == 17) {
-				repeatLength(lengths, index, 0, stream.bits(3) + 3);
-			} else {
-				repeatLength(lengths, index, 0, stream.bits(7) + 11);
+				continue;
+			}
+
+			if (symbol == 16 && index == 0) return false;
+
+			const short value = symbol == 16 ? lengths[index - 1] : 0;
+			const int extra_bits = symbol == 16 ? 2 : (symbol == 17 ? 3 : 7);
+			const int base = symbol == 18 ? 11 : 3;
+			if (!repeatLength(lengths, index, total, value, stream.bits(extra_bits) + base)) {
+				return false;
 			}
 		}
 
 		return true;
+	}
+
+	// RFC 1951 allows exactly one incomplete code: a single symbol of
+	// length one (as puff puts it, "incomplete code ok only for single
+	// length 1 code").
+	static bool acceptableCode(const Huffman& table, int unused, int symbol_count) {
+		if (unused == 0) return true;
+		if (unused < 0) return false;
+		return symbol_count == table.count[0] + table.count[1];
 	}
 
 	static int inflateDynamicBlock(BitStream& stream) {
@@ -243,12 +257,12 @@ namespace wbsh {
 		if (lengths[kEndOfBlock] == 0) return -1;
 
 		Huffman length_table;
-		if (buildHuffman(length_table, lengths, length_count) != 0
-				&& (length_count != 1 || lengths[0] != 0)) return -1;
+		const int length_unused = buildHuffman(length_table, lengths, length_count);
+		if (!acceptableCode(length_table, length_unused, length_count)) return -1;
 
 		Huffman dist_table;
-		if (buildHuffman(dist_table, lengths + length_count, dist_count) != 0
-				&& (dist_count != 1 || lengths[length_count] != 0)) return -1;
+		const int dist_unused = buildHuffman(dist_table, lengths + length_count, dist_count);
+		if (!acceptableCode(dist_table, dist_unused, dist_count)) return -1;
 
 		return decodeBlockCodes(stream, length_table, dist_table);
 	}
@@ -262,7 +276,8 @@ namespace wbsh {
 		}
 	}
 
-	bool inflateRaw(const std::uint8_t* in, std::size_t in_len, std::vector<std::uint8_t>& out) {
+	bool inflateRawConsumed(const std::uint8_t* in, std::size_t in_len,
+	                        std::vector<std::uint8_t>& out, std::size_t& consumed) {
 		BitStream stream(in, in_len, out);
 		bool last = false;
 		while (!last) {
@@ -272,7 +287,13 @@ namespace wbsh {
 			if (inflateBlock(stream, type) != 0 || stream.failed) return false;
 		}
 
+		consumed += stream.in_pos;
 		return true;
+	}
+
+	bool inflateRaw(const std::uint8_t* in, std::size_t in_len, std::vector<std::uint8_t>& out) {
+		std::size_t consumed = 0;
+		return inflateRawConsumed(in, in_len, out, consumed);
 	}
 
 }  // namespace wbsh

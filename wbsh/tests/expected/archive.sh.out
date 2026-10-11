@@ -8,8 +8,8 @@ compress me, please. compress me, please. compress me, please.
 f1 ok
 f3 ok
 === zip / unzip
-  adding: src/f1.txt (stored)
-  adding: src/f2.txt (stored)
+  adding: src/f1.txt (stored 0%)
+  adding: src/f2.txt (stored 0%)
 zip created
   inflating: src/f1.txt
   inflating: src/f2.txt

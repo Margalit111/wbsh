@@ -38,6 +38,7 @@
 #include <utility>
 #include <vector>
 
+#include "devices.h"
 #include "fnmatch.h"
 #include "lexer.h"
 #include "numparse.h"
@@ -132,6 +133,17 @@ namespace wbsh {
 	static bool hasPrefixAndRest(const std::string& text, const std::string& prefix) {
 		return text.size() > prefix.size()
 			&& text.compare(0, prefix.size(), prefix) == 0;
+	}
+
+	static std::string shellQuoteSingle(const std::string& text) {
+		std::string quoted = "'";
+		for (char c : text) {
+			if (c == '\'') quoted += "'\\''";
+			else           quoted.push_back(c);
+		}
+
+		quoted += "'";
+		return quoted;
 	}
 
 	static void appendFields(std::vector<std::string>& into, std::vector<std::string>& fields) {
@@ -899,6 +911,54 @@ namespace wbsh {
 		return selfSpawnPipelineElement(elem, h_in, h_out, h_err);
 	}
 
+	static std::string quotedCommandText(const std::vector<std::string>& argv) {
+		std::string text;
+		for (const std::string& word : argv) {
+			if (!text.empty()) text.push_back(' ');
+			text += shellQuoteSingle(word);
+		}
+
+		return text;
+	}
+
+	bool Executor::runsInsideShell(const std::string& name) const {
+		return isFunction(name) || isBuiltin(name) || isAlias(name);
+	}
+
+	HANDLE Executor::spawnShellCommand(const std::vector<std::string>& argv) {
+		const std::string self = getSelfExecutablePath();
+		const std::vector<std::string> child_argv = { self, "-r", "-c", quotedCommandText(argv) };
+
+		SpawnCommand command;
+		command.exe      = utf8ToWide(self);
+		command.cmdline  = buildCommandLine(child_argv);
+		command.envblock = buildEnvBlock(env_, buildSelfSpawnOverrides(),
+			/*include_unexported=*/true);
+		return spawnWithHandles(command, currentStdio());
+	}
+
+	HANDLE Executor::spawnCommand(const std::vector<std::string>& argv) {
+		if (argv.empty()) return INVALID_HANDLE_VALUE;
+
+		std::fflush(stdout);
+		std::fflush(stderr);
+		if (runsInsideShell(argv[0])) return spawnShellCommand(argv);
+
+		const std::string exec_path = findExecutable(argv[0]);
+		if (exec_path.empty()) {
+			reportCommandNotFound(argv[0]);
+			return INVALID_HANDLE_VALUE;
+		}
+
+		if (looksLikeShellScript(exec_path)) return spawnShellCommand(argv);
+
+		const NameValueList no_assignments;
+		SpawnCommand command = makeSpawnCommand(
+			prepareExternalArgv(argv, exec_path, no_assignments), exec_path,
+			buildEnvBlock(env_, prepareExternalEnvOverrides(no_assignments)));
+		return spawnWithHandles(command, currentStdio());
+	}
+
 	// A prefix assignment whose value fails to expand is dropped rather
 	// than aborting the launch.
 	static NameValueList expandPrefixAssignments(Expander& expander,
@@ -1025,9 +1085,16 @@ namespace wbsh {
 		return fd;
 	}
 
+	static bool opensForWriting(int flags) {
+		return (flags & (_O_WRONLY | _O_RDWR)) != 0;
+	}
+
 	int Executor::openRedirSourceFd(const std::string& path, int flags) const {
 		int fd = dupSpecialDevFd(path);
 		if (fd >= 0) return fd;
+
+		if (isGeneratorDevice(path) && !opensForWriting(flags)) return openGeneratorDevice(path);
+		if (isGeneratorDevice(path)) return _wopen(L"NUL", flags | _O_BINARY, _S_IREAD | _S_IWRITE);
 
 		fd = openTcpUdpStream(path);
 		if (fd >= 0) return fd;
@@ -2770,17 +2837,6 @@ namespace wbsh {
 		}
 
 		return true;
-	}
-
-	static std::string shellQuoteSingle(const std::string& text) {
-		std::string quoted = "'";
-		for (char c : text) {
-			if (c == '\'') quoted += "'\\''";
-			else           quoted.push_back(c);
-		}
-
-		quoted += "'";
-		return quoted;
 	}
 
 	template <typename Map>

@@ -135,6 +135,7 @@ PS1='\[\e[35;1m\]\w\[\e[0m\]\g \$ '
 | `COLUMNS`, `LINES` | Updated on resize; fires the `WINCH` trap.               |
 | `WBSH_GIT_NO_DIRTY` | Skip the working-tree check in the `\g` prompt (huge repos). |
 | `WBSH_NO_PATHCONV`, `MSYS_NO_PATHCONV` | Suppress POSIX→Win32 argument translation for spawned commands. |
+| `WBSH_PAGER` | `builtin` makes `less` use the bundled pager even when a `less` is on PATH. |
 
 Prompt escapes: `\u` user, `\h` / `\H` short / long hostname, `\w` / `\W`
 working directory / its basename, `\g` ` (branch)` inside a git repo, `\t`
@@ -157,15 +158,42 @@ non-printing markers. Default `PS1`:
 `compgen`, `complete`, `compopt`, `readonly`, `jobs`, `wait`, `fg`, `bg`,
 `disown`.
 
-**Coreutils:** `ls`, `cat`, `clear`, `which`, `mkdir`, `rmdir`, `rm`, `cp`,
-`mv`, `touch`, `head`, `tail`, `wc`, `whoami`, `hostname`, `env`, `sleep`,
-`basename`, `dirname`, `sort`, `uniq`, `tr`, `cut`, `tee`, `paste`, `tac`,
-`rev`, `nl`, `date`, `seq`, `uname`, `id`, `realpath`, `readlink`, `expr`,
-`grep`, `find`, `xargs`, `pushd`, `popd`, `dirs`, `xxd`, `od`, `fold`,
-`column`, `expand`, `unexpand`, `comm`, `yes`, `nproc`, `tput`, `mktemp`,
-`kill`, `sed`, `awk` / `gawk`, `bc`, `gzip`, `gunzip`, `zcat`, `zip`, `unzip`,
-`stat`, `chmod`, `ln`, `cmp`, `diff`, `du`, `df`, `md5sum`, `sha1sum`,
-`sha256sum`, `sha512sum`, `base64`, `curl`, `tar`, `fzf`, `tmux`, `utils`.
+**Files:** `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `ln`,
+`link`, `unlink`, `stat`, `chmod`, `chattr`, `lsattr`, `du`, `df`, `realpath`,
+`readlink`, `basename`, `dirname`, `find`, `dd`, `split`, `truncate`, `shred`,
+`sync`, `fsync`, `flock`, `mktemp`, `pushd`, `popd`, `dirs`.
+
+**Text:** `head`, `tail` (`-f`), `wc`, `sort`, `uniq`, `tr`, `cut`, `tee`,
+`paste`, `join`, `tac`, `rev`, `nl`, `fold`, `column`, `expand`, `unexpand`,
+`comm`, `shuf`, `tsort`, `strings`, `grep` / `egrep` / `fgrep`, `sed`,
+`awk` / `gawk`, `diff` (`-r`), `cmp`, `patch`, `dos2unix`, `unix2dos`,
+`iconv`, `xargs`, `less`, `more`.
+
+**Encoding and hashing:** `base64`, `base32`, `uuencode`, `uudecode`, `xxd`,
+`od`, `hexdump`, `hd`, `md5sum`, `sha1sum`, `sha256sum`, `sha384sum`,
+`sha512sum`, `sha3sum` (all with `-c`), `cksum`, `sum`, `crc32`.
+
+**Archives and compression:** `tar` (gzip, bzip2, xz, lzma and compress are
+detected on read; `-z` / `-j` / `-a` on write), `gzip`, `gunzip`, `zcat`,
+`bzip2`, `bunzip2`, `bzcat`, `xz` / `unxz` / `xzcat`, `lzma` / `unlzma` /
+`lzcat`, `uncompress`, `zip`, `unzip`, `cpio`, `ar` (read-only). `xz` and
+`lzma` decompress only, as busybox's do.
+
+**Processes and system:** `ps`, `pgrep`, `pkill`, `pidof`, `kill`, `killall`,
+`timeout`, `watch`, `uptime`, `free`, `nproc`, `env` (`-i`, `-u`, `NAME=value
+command`), `printenv`, `whoami`, `logname`, `groups`, `id`, `hostname`,
+`uname`, `date`, `cal`, `sleep`, `usleep`, `stty`, `reset`, `tput`,
+`ttysize`, `clear`.
+
+**Other:** `echo`, `printf` (`%b`, `%q`, `-v`), `seq`, `expr`, `bc`, `dc`,
+`factor`, `getopt`, `uuidgen`, `ascii`, `ipcalc`, `ts`, `yes`, `which`,
+`curl`, `wget`, `fzf`, `tmux`, `utils`.
+
+`/dev/zero`, `/dev/random`, `/dev/urandom` and `/dev/full` exist for
+redirections and for every bundled command that reads a file.
+
+`less` hands over to a real `less` when one is on PATH and stdout is a
+console; otherwise (or with `WBSH_PAGER=builtin`) the built-in pager runs.
 
 `tmux` is not the real tmux: under wbshterm it opens pane mode (splits, status
 bar, `Ctrl-B` prefix; see [wbshterm/README.md](wbshterm/README.md#panes)),

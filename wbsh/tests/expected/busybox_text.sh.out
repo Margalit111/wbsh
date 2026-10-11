@@ -1,0 +1,129 @@
+=== printf
+a	b|
+[hi-16]
+65 8 a\ b
+   ab|cd   |%|   7|
+AB
+stop
+p
+--
+=== head / tail
+1 2 3 
+0000000   1  \n   2  \n   3
+0000005
+8 9 10 
+ 9 10 
+==> _bb_seq.txt <==
+1
+2
+
+==> _bb_seq.txt <==
+1
+2
+=== egrep / fgrep
+hello
+a.b
+=== join / tsort / strings / shuf
+1 apple red
+3 cherry dark
+1 apple red
+3 cherry dark
+4 NONE green
+a x b y c d 
+hello
+world!!
+1 2 3 4 5 
+=== factor / cal / getopt
+12: 2 2 3
+97: 97
+600851475143: 71 839 1471 6857
+   February 2024
+Su Mo Tu We Th Fr Sa
+             1  2  3
+ 4  5  6  7  8  9 10
+11 12 13 14 15 16 17
+18 19 20 21 22 23 24
+25 26 27 28 29
+
+ -a -b 'X' -c '' --beta '4' --alpha -- 'file1' 'x y'
+[--verbose][--][a b]
+=== encodings
+MZXW6YTBOI======
+foobar
+begin 644 x.txt
+#0V%T
+`
+end
+Cat
+ 61 62 63 0a
+0000000  61  62  63  64  65  66  67  68
+          a   b   c   d   e   f   g   h
+0000010
+00000000  68 65 6c 6c 6f 20 77 6f  72 6c 64 0a              |hello world.|
+0000000c
+0000000 6568 6c6c 0a6f
+0000006
+=== hashes
+cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7  -
+e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf  -
+3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532  -
+1219131554 3
+352441c2
+16556     1
+_bb_a.txt: OK
+=== dc / ipcalc / iconv
+5
+3
+3.33
+1024
+NETMASK=255.255.240.0
+BROADCAST=192.168.15.255
+NETWORK=192.168.0.0
+PREFIX=20
+ 8e 6c 75 9d
+ab
+=== grep
+a+b
+aab
+abab
+abab
+one
+      3 a
+      1 aa
+2:aab
+3-abab
+2
+phone
+=== sed
+1
+5
+6
+3
+4
+1 2
+3 4
+5 6
+5
+4
+3
+2
+1
+world hello
+WORLD hello
+a,b,c
+1
+inserted
+2
+3
+1
+two
+two
+3
+2
+4
+-a-y-
+=== env
+2
+unset for the child
+parent still 1
+=== done

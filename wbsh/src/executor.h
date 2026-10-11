@@ -372,6 +372,25 @@ namespace wbsh {
 		// function scope is popped, then assigns `value`.
 		void declareLocal(const std::string& name, const std::string& value);
 
+		// Run argv as a resolved command (function, builtin, or external) with
+		// `assigns` in its environment only, the way a `NAME=value cmd` prefix does.
+		int  runResolvedCommand(
+			const std::vector<std::string>& argv,
+			const std::vector<std::pair<std::string, std::string>>& assigns);
+
+		// Run argv[0] from PATH even when a builtin or function shares its
+		// name; `temp_env` is added to the child's environment only.
+		int  runExternal(const std::vector<std::string>& argv,
+		                 const std::vector<std::pair<std::string, std::string>>& temp_env);
+
+#ifdef _WIN32
+		// Start argv as its own process on the current stdio without waiting:
+		// an external directly, a builtin, function or alias through a child
+		// wbsh that inherits this shell's state. The caller owns the returned
+		// handle; INVALID_HANDLE_VALUE (already reported) when nothing started.
+		HANDLE spawnCommand(const std::vector<std::string>& argv);
+#endif
+
 		// Walk PATH for an executable named `name`. Returns the resolved
 		// path (UTF-8) or empty if not found. Honours Windows PATHEXT-style
 		// .exe/.cmd/.bat resolution. Used by `type`, `command -v`, etc.
@@ -514,9 +533,6 @@ namespace wbsh {
 		int  execBareRedirsForExec(const std::vector<Redirection>& redirs);
 		void applyBareAssignmentsToShell(const SimpleCmdAssigns& a);
 		int  execSimpleCommandNoArgv(const SimpleCommand& sc, SimpleCmdAssigns& assigns_data);
-		int  runResolvedCommand(
-			const std::vector<std::string>& argv,
-			const std::vector<std::pair<std::string, std::string>>& assigns);
 		void traceXtrace(const std::vector<std::string>& argv);
 
 		// State snapshotted at the start of a shell-script invocation
@@ -547,9 +563,6 @@ namespace wbsh {
 		};
 		SubshellScope snapshotSubshellScope() const;
 		void restoreSubshellScope(SubshellScope& snap);
-
-		int  runExternal(const std::vector<std::string>& argv,
-		                 const std::vector<std::pair<std::string, std::string>>& temp_env);
 
 #ifdef _WIN32
 		// Build the argv passed to CreateProcess: replaces argv[0] with the
@@ -612,6 +625,8 @@ namespace wbsh {
 		HANDLE tryDirectExternalLaunch(const Node& elem,
 		                               HANDLE h_in, HANDLE h_out, HANDLE h_err,
 		                               bool* tried);
+		bool   runsInsideShell(const std::string& name) const;
+		HANDLE spawnShellCommand(const std::vector<std::string>& argv);
 		// Re-enter wbsh on the original source slice that produced this AST
 		// node. Used as the fallback when a pipeline element is a builtin,
 		// function, alias, or anything else that can't run as a separate exe.

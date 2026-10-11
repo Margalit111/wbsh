@@ -292,6 +292,11 @@ static void prepareCrtForShellUse() {
 	// and files, which corrupts `$(...)` captures and `read` values.
 	_setmode(_fileno(stdout), _O_BINARY);
 	_setmode(_fileno(stderr), _O_BINARY);
+
+	// Text-mode input drops every `\r` before a `\n` and stops at the first
+	// 0x1A byte, so piped archives and binary data arrive corrupted. The
+	// console keeps text mode: its line input arrives as `\r\n`.
+	if (_isatty(_fileno(stdin)) == 0) _setmode(_fileno(stdin), _O_BINARY);
 }
 
 #endif /* _WIN32 */

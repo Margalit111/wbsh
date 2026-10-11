@@ -1,0 +1,69 @@
+=== generator devices
+ 00 00 00 00 00 00 00 00
+16
+write to /dev/zero ok
+=== dd / split / truncate
+4096
+WOR
+part_aa
+part_ab
+part_ac
+split pieces rejoin
+150
+=== dos2unix / unix2dos
+0000000   a  \n   b  \n
+0000004
+0000000   a  \r  \n   b  \r  \n
+0000006
+=== link / unlink
+hard link ok
+unlinked
+=== patch
+patching file work.txt
+patched
+reversed
+=== diff -r / ls -R
+Only in da/sub: q
+diff -r da/x db/x
+1c1
+< 1
+---
+> 2
+da:
+sub/
+x
+
+da/sub:
+q
+s
+=== compression round trips
+gzip ok
+bzip2 ok
+bzip2 -k kept the input
+=== reference decoders
+xz ok
+lzma ok
+bzip2 reference ok
+compress ok
+=== tar
+tree/
+tree/a.txt
+tree/sub/
+tree/sub/b.txt
+out:
+a.txt
+sub/
+
+out/sub:
+b.txt
+hello
+tree/
+tree/sub/
+hi
+=== cpio
+tree
+tree/a.txt
+tree/sub
+tree/sub/b.txt
+deep
+=== done

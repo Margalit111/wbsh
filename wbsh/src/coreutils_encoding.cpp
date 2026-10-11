@@ -1,6 +1,6 @@
 /**
  * @file coreutils_encoding.cpp
- * @brief Byte-dump / encoding coreutils: base64, xxd, od.
+ * @brief Encoding coreutils: base64, base32, uuencode, uudecode, xxd.
  */
 
 #include "coreutils_internal.h"
@@ -22,7 +22,6 @@ namespace wbsh {
 	static const std::size_t kBase64DefaultWrap = 76;
 	static const int kXxdDefaultColumns = 16;
 	static const int kXxdPlainLineHexDigits = 60;
-	static const std::size_t kOdBytesPerRow = 16;
 
 	static std::vector<unsigned char> readAllBytes(FILE* stream) {
 		std::vector<unsigned char> bytes;
@@ -327,116 +326,254 @@ namespace wbsh {
 		return xxdEmitDefault(bytes, options.cols);
 	}
 
-	struct OdOptions {
-		char format = 'o';
-		char addr_format = 'o';
-		std::string path;
-	};
+	static const char* const kBase32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+	static const std::size_t kUuLineBytes = 45;
+	static const std::size_t kUuBase64Wrap = 60;
 
-	static bool isOdFormat(char c) {
-		return c == 'x' || c == 'd' || c == 'o' || c == 'c';
+	static std::string base32Encode(const std::vector<unsigned char>& in) {
+		std::string out;
+		for (std::size_t i = 0; i < in.size(); i += 5) {
+			const std::size_t take = (std::min)(static_cast<std::size_t>(5), in.size() - i);
+			unsigned long long group = 0;
+			for (std::size_t k = 0; k < 5; ++k) {
+				group = (group << 8) | (k < take ? in[i + k] : 0);
+			}
+
+			const std::size_t significant = (take * 8 + 4) / 5;
+			for (std::size_t k = 0; k < 8; ++k) {
+				const unsigned index = static_cast<unsigned>((group >> (35 - 5 * k)) & 0x1F);
+				out.push_back(k < significant ? kBase32Alphabet[index] : '=');
+			}
+		}
+
+		return out;
 	}
 
-	static bool parseOdArgs(const std::vector<std::string>& args, OdOptions& options) {
-		for (std::size_t i = 0; i < args.size(); ++i) {
-			const std::string& arg = args[i];
-			if (arg == "-c") {
-				options.format = 'c';
-			} else if (arg == "-x" || arg == "-h") {
-				options.format = 'x';
-			} else if (arg == "-d") {
-				options.format = 'd';
-			} else if (arg == "-o") {
-				options.format = 'o';
-			} else if (arg == "-A" && i + 1 < args.size()) {
-				const std::string& radix = args[++i];
-				if (!radix.empty()) options.addr_format = radix[0];
-			} else if (arg == "-t" && i + 1 < args.size()) {
-				const std::string& type = args[++i];
-				if (!type.empty() && isOdFormat(type[0])) options.format = type[0];
-			} else if (!arg.empty() && arg[0] == '-' && arg != "-") {
-				perr("od", "unknown option: " + arg);
-				return false;
-			} else if (options.path.empty()) {
-				options.path = arg;
-			}
+	static int base32Value(char c) {
+		const int upper = std::toupper(static_cast<unsigned char>(c));
+		const char* found = std::strchr(kBase32Alphabet, upper);
+		if (found == nullptr || c == '\0') return -1;
+		return static_cast<int>(found - kBase32Alphabet);
+	}
+
+	static bool base32Decode(const std::string& in, bool ignore_garbage,
+	                         std::vector<unsigned char>& out) {
+		unsigned long long buffer = 0;
+		int bits = 0;
+		for (const char c : in) {
+			if (c == '=' || std::isspace(static_cast<unsigned char>(c)) != 0) continue;
+
+			const int value = base32Value(c);
+			if (value < 0 && ignore_garbage) continue;
+			if (value < 0) return false;
+
+			buffer = (buffer << 5) | static_cast<unsigned>(value);
+			bits += 5;
+			if (bits < 8) continue;
+
+			bits -= 8;
+			out.push_back(static_cast<unsigned char>((buffer >> bits) & 0xFF));
 		}
 
 		return true;
 	}
 
-	static void odPrintAddr(std::size_t addr, char addr_format, bool with_newline) {
-		const char* newline = with_newline ? "\n" : "";
-		switch (addr_format) {
-		case 'd': std::printf("%07zu%s", addr, newline); return;
-		case 'x': std::printf("%07zx%s", addr, newline); return;
-		case 'n': return;
-		default:  std::printf("%07zo%s", addr, newline); return;
+	static int builtin_base32(Executor& exec, const std::vector<std::string>& args) {
+		const Base64Options options = parseBase64Args(args);
+		bool ignore_garbage = false;
+		for (const std::string& arg : args) {
+			if (arg == "-i" || arg == "--ignore-garbage") ignore_garbage = true;
 		}
-	}
-
-	static const char* odEscapeName(unsigned char byte) {
-		switch (byte) {
-		case '\0': return "\\0";
-		case '\a': return "\\a";
-		case '\b': return "\\b";
-		case '\t': return "\\t";
-		case '\n': return "\\n";
-		case '\v': return "\\v";
-		case '\f': return "\\f";
-		case '\r': return "\\r";
-		default:   return nullptr;
-		}
-	}
-
-	static void odEmitCharCell(unsigned char byte) {
-		const char* escape = odEscapeName(byte);
-		if (escape != nullptr) std::printf("  %s", escape);
-		else if (byte >= 32 && byte < 127) std::printf("   %c", byte);
-		else std::printf(" %03o", byte);
-	}
-
-	static const char* odNumericSpec(char format) {
-		if (format == 'x') return " %02x";
-		if (format == 'd') return " %3u";
-		return " %03o";
-	}
-
-	static void odEmitRow(const std::vector<unsigned char>& bytes,
-			std::size_t addr, std::size_t end, char format) {
-		if (format == 'c') {
-			for (std::size_t i = addr; i < end; ++i) odEmitCharCell(bytes[i]);
-			return;
-		}
-
-		const char* spec = odNumericSpec(format);
-		for (std::size_t i = addr; i < end; ++i) std::printf(spec, bytes[i]);
-	}
-
-	static int builtin_od(Executor& exec, const std::vector<std::string>& args) {
-		OdOptions options;
-		if (!parseOdArgs(args, options)) return 1;
 
 		std::vector<unsigned char> bytes;
-		if (!readInputBytes(exec, "od", options.path, bytes)) return 1;
+		if (!readBase64Input(exec, options.file, bytes)) return 1;
 
-		std::size_t addr = 0;
-		while (addr < bytes.size()) {
-			odPrintAddr(addr, options.addr_format, false);
-			const std::size_t end = (std::min)(bytes.size(), addr + kOdBytesPerRow);
-			odEmitRow(bytes, addr, end, options.format);
-			std::printf("\n");
-			addr = end;
+		if (!options.decode) {
+			writeWrapped(base32Encode(bytes), options.wrap);
+			std::fflush(stdout);
+			return 0;
 		}
 
-		odPrintAddr(bytes.size(), options.addr_format, true);
+		std::vector<unsigned char> decoded;
+		if (!base32Decode(std::string(bytes.begin(), bytes.end()), ignore_garbage, decoded)) {
+			perr("base32", "invalid input");
+			return 1;
+		}
+
+		std::fwrite(decoded.data(), 1, decoded.size(), stdout);
+		std::fflush(stdout);
 		return 0;
 	}
 
+	static char uuChar(unsigned value) {
+		return value == 0 ? '`' : static_cast<char>(' ' + value);
+	}
+
+	static void uuEncodeLine(const std::vector<unsigned char>& bytes, std::size_t at,
+	                         std::size_t take) {
+		std::string line(1, uuChar(static_cast<unsigned>(take)));
+		for (std::size_t k = 0; k < take; k += 3) {
+			const unsigned b0 = bytes[at + k];
+			const unsigned b1 = k + 1 < take ? bytes[at + k + 1] : 0;
+			const unsigned b2 = k + 2 < take ? bytes[at + k + 2] : 0;
+			line.push_back(uuChar(b0 >> 2));
+			line.push_back(uuChar(((b0 << 4) | (b1 >> 4)) & 0x3F));
+			line.push_back(uuChar(((b1 << 2) | (b2 >> 6)) & 0x3F));
+			line.push_back(uuChar(b2 & 0x3F));
+		}
+
+		std::printf("%s\n", line.c_str());
+	}
+
+	static int builtin_uuencode(Executor& exec, const std::vector<std::string>& args) {
+		bool base64 = false;
+		std::vector<std::string> operands;
+		for (const std::string& arg : args) {
+			if (arg == "-m" || arg == "--base64") base64 = true;
+			else                                  operands.push_back(arg);
+		}
+
+		if (operands.empty() || operands.size() > 2) {
+			perr("uuencode", "usage: uuencode [-m] [INFILE] STORED_NAME");
+			return 1;
+		}
+
+		std::vector<unsigned char> bytes;
+		const std::string input = operands.size() == 2 ? operands[0] : "-";
+		if (!readInputBytes(exec, "uuencode", input, bytes)) return 1;
+
+		const std::string& name = operands.back();
+		std::printf("begin%s 644 %s\n", base64 ? "-base64" : "", name.c_str());
+		if (base64) {
+			writeWrapped(base64Encode(bytes), kUuBase64Wrap);
+			std::printf("====\n");
+			std::fflush(stdout);
+			return 0;
+		}
+
+		for (std::size_t at = 0; at < bytes.size(); at += kUuLineBytes) {
+			uuEncodeLine(bytes, at, (std::min)(kUuLineBytes, bytes.size() - at));
+		}
+
+		std::printf("`\nend\n");
+		std::fflush(stdout);
+		return 0;
+	}
+
+	static unsigned uuValue(char c) {
+		return static_cast<unsigned>(c - ' ') & 0x3F;
+	}
+
+	static void uuDecodeLine(const std::string& line, std::vector<unsigned char>& out) {
+		if (line.empty()) return;
+
+		const std::size_t length = uuValue(line[0]);
+		std::size_t produced = 0;
+		for (std::size_t k = 1; k < line.size() && produced < length; k += 4) {
+			unsigned quad[4] = { 0, 0, 0, 0 };
+			for (std::size_t q = 0; q < 4; ++q) {
+				if (k + q < line.size()) quad[q] = uuValue(line[k + q]);
+			}
+
+			const unsigned char decoded[3] = {
+				static_cast<unsigned char>((quad[0] << 2) | (quad[1] >> 4)),
+				static_cast<unsigned char>((quad[1] << 4) | (quad[2] >> 2)),
+				static_cast<unsigned char>((quad[2] << 6) | quad[3]),
+			};
+			for (std::size_t b = 0; b < 3 && produced < length; ++b, ++produced) {
+				out.push_back(decoded[b]);
+			}
+		}
+	}
+
+	static bool parseUuHeader(const std::string& line, bool& base64, std::string& name) {
+		const bool traditional = line.compare(0, 6, "begin ") == 0;
+		base64 = line.compare(0, 13, "begin-base64 ") == 0;
+		if (!traditional && !base64) return false;
+
+		const std::size_t mode_start = line.find(' ');
+		const std::size_t name_start = line.find(' ', mode_start + 1);
+		if (name_start == std::string::npos) return false;
+
+		name = line.substr(name_start + 1);
+		return !name.empty();
+	}
+
+	static bool decodeUuBody(const std::vector<std::string>& lines, std::size_t first, bool base64,
+	                         std::vector<unsigned char>& out) {
+		std::string encoded;
+		for (std::size_t i = first; i < lines.size(); ++i) {
+			const std::string& line = lines[i];
+			if (base64 && line == "====") break;
+			if (!base64 && line == "end") break;
+			if (base64) encoded += line;
+			else        uuDecodeLine(line, out);
+		}
+
+		if (!base64) return true;
+
+		bool ok = false;
+		out = base64Decode(encoded, ok);
+		return ok;
+	}
+
+	static bool writeDecodedFile(Executor& exec, const std::string& target,
+	                             const std::vector<unsigned char>& data) {
+		if (target == "-" || target == "/dev/stdout") {
+			std::fwrite(data.data(), 1, data.size(), stdout);
+			std::fflush(stdout);
+			return true;
+		}
+
+		std::FILE* out = fopenNative(exec, target, "wb");
+		if (out == nullptr) {
+			perr("uudecode", target + ": " + std::strerror(errno));
+			return false;
+		}
+
+		std::fwrite(data.data(), 1, data.size(), out);
+		std::fclose(out);
+		return true;
+	}
+
+	static int builtin_uudecode(Executor& exec, const std::vector<std::string>& args) {
+		std::string output;
+		std::string input = "-";
+		for (std::size_t i = 0; i < args.size(); ++i) {
+			if (args[i] == "-o" && i + 1 < args.size()) output = args[++i];
+			else                                        input = args[i];
+		}
+
+		std::vector<std::string> lines;
+		if (!readAllLines(exec, input, lines)) {
+			perr("uudecode", input + ": " + std::strerror(errno));
+			return 1;
+		}
+
+		for (std::size_t i = 0; i < lines.size(); ++i) {
+			bool base64 = false;
+			std::string name;
+			if (!parseUuHeader(lines[i], base64, name)) continue;
+
+			std::vector<unsigned char> data;
+			if (!decodeUuBody(lines, i + 1, base64, data)) {
+				perr("uudecode", "invalid input");
+				return 1;
+			}
+
+			return writeDecodedFile(exec, output.empty() ? name : output, data) ? 0 : 1;
+		}
+
+		perr("uudecode", "no 'begin' line");
+		return 1;
+	}
+
 	void registerEncodingBuiltins(Executor& exec) {
-		exec.registerBuiltin("xxd",    builtin_xxd);
-		exec.registerBuiltin("od",     builtin_od);
-		exec.registerBuiltin("base64", builtin_base64);
+		exec.registerBuiltin("xxd",      builtin_xxd);
+		exec.registerBuiltin("base64",   builtin_base64);
+		exec.registerBuiltin("base32",   builtin_base32);
+		exec.registerBuiltin("uuencode", builtin_uuencode);
+		exec.registerBuiltin("uudecode", builtin_uudecode);
 	}
 
 }  // namespace wbsh

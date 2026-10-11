@@ -46,6 +46,27 @@ namespace wbsh {
 		}
 	}
 
+	/// searchRegex over [first, last) with explicit match flags (for
+	/// match_prev_avail when the range starts mid-subject).
+	inline bool searchRegexFlags(std::string::const_iterator first,
+	                             std::string::const_iterator last, const std::regex& re,
+	                             std::smatch& m, std::regex_constants::match_flag_type flags) {
+		try {
+			return std::regex_search(first, last, m, re, flags);
+		} catch (const std::regex_error&) {
+			return false;
+		}
+	}
+
+	/// regex_match (whole-subject) with the same "failure is no match" rule.
+	inline bool matchRegex(const std::string& s, const std::regex& re) {
+		try {
+			return std::regex_match(s, re);
+		} catch (const std::regex_error&) {
+			return false;
+		}
+	}
+
 	/**
 	 * @brief searchRegex over the [first, last) range of a string.
 	 *

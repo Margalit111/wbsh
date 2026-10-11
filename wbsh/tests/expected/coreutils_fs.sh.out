@@ -16,7 +16,7 @@ tree removed
 === ls -1 / ls -a
 another.txt
 visible.txt
-
+--
 .hidden
 another.txt
 visible.txt

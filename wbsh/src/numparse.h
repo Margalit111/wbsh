@@ -60,6 +60,18 @@ namespace wbsh {
 		return true;
 	}
 
+	inline bool parseULL(const std::string& s, unsigned long long& out,
+	                     std::size_t* consumed = nullptr, int base = 10) {
+		const char* begin = s.c_str();
+		char* end = nullptr;
+		errno = 0;
+		const unsigned long long value = std::strtoull(begin, &end, base);
+		if (end == begin || errno == ERANGE) return false;
+		out = value;
+		if (consumed != nullptr) *consumed = static_cast<std::size_t>(end - begin);
+		return true;
+	}
+
 	inline bool parseDouble(const std::string& s, double& out,
 	                        std::size_t* consumed = nullptr) {
 		const char* begin = s.c_str();

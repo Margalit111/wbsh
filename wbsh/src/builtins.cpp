@@ -183,10 +183,17 @@ namespace wbsh {
 		}
 	}
 
-	static std::string interpretEcho(const std::string& text) {
-		std::string out;
+	static bool isStopEscape(const std::string& text, std::size_t i) {
+		return text[i] == '\\' && i + 1 < text.size() && text[i + 1] == 'c';
+	}
+
+	// Returns false when the text held `\c`: everything after it, the
+	// trailing newline included, is suppressed.
+	static bool interpretEcho(const std::string& text, std::string& out) {
 		for (std::size_t i = 0; i < text.size(); ++i) {
 			const char c = text[i];
+			if (isStopEscape(text, i)) return false;
+
 			if (c == '\\' && i + 1 < text.size()) {
 				appendEchoEscape(text, i, out);
 				continue;
@@ -195,7 +202,7 @@ namespace wbsh {
 			out.push_back(c);
 		}
 
-		return out;
+		return true;
 	}
 
 	static bool applyEchoFlags(const std::string& flag, bool& newline, bool& interpret) {
@@ -217,7 +224,6 @@ namespace wbsh {
 			bool& interpret) {
 		std::size_t i = 0;
 		while (i < args.size() && !args[i].empty() && args[i][0] == '-') {
-			if (args[i] == "--") return i + 1;
 			if (!applyEchoFlags(args[i], newline, interpret)) break;
 			++i;
 		}
@@ -225,38 +231,95 @@ namespace wbsh {
 		return i;
 	}
 
+	static std::string echoText(const std::vector<std::string>& args, std::size_t first,
+			bool newline, bool interpret) {
+		std::string out;
+		for (std::size_t i = first; i < args.size(); ++i) {
+			if (i > first) out.push_back(' ');
+			if (!interpret) out += args[i];
+			else if (!interpretEcho(args[i], out)) return out;
+		}
+
+		if (newline) out.push_back('\n');
+		return out;
+	}
+
 	static int builtin_echo(Executor&, const std::vector<std::string>& args) {
 		bool newline = true;
 		bool interpret = false;
 		const std::size_t first = parseEchoFlags(args, newline, interpret);
 
-		for (std::size_t i = first; i < args.size(); ++i) {
-			if (i > first) std::fputc(' ', stdout);
-			if (interpret) writeStdout(interpretEcho(args[i]));
-			else writeStdout(args[i]);
-		}
-
-		if (newline) std::fputc('\n', stdout);
+		writeStdout(echoText(args, first, newline, interpret));
 		std::fflush(stdout);
 		return 0;
 	}
 
-	static void emitBackslashEscape(char next) {
-		switch (next) {
-		case 'a':  std::fputc('\a', stdout); break;
-		case 'b':  std::fputc('\b', stdout); break;
-		case 'e':  std::fputc('\x1b', stdout); break;
-		case 'f':  std::fputc('\f', stdout); break;
-		case 'n':  std::fputc('\n', stdout); break;
-		case 'r':  std::fputc('\r', stdout); break;
-		case 't':  std::fputc('\t', stdout); break;
-		case 'v':  std::fputc('\v', stdout); break;
-		case '\\': std::fputc('\\', stdout); break;
-		default:
-			std::fputc('\\', stdout);
-			std::fputc(next, stdout);
-			break;
+	namespace printf_detail {
+
+		struct PrintfRun {
+			std::vector<std::string> args;
+			std::size_t next_arg = 0;
+			std::string out;
+			bool bad_number = false;
+			bool stopped = false;
+		};
+
+	}  // namespace printf_detail
+
+	using printf_detail::PrintfRun;
+
+	static void appendFormatEscape(const std::string& fmt, std::size_t& i, std::string& out) {
+		const char next = fmt[i + 1];
+		if (next >= '0' && next <= '7') {
+			appendOctalEscape(fmt, i, out);
+			return;
 		}
+
+		if (next == '"') {
+			out.push_back('"');
+			++i;
+			return;
+		}
+
+		appendEchoEscape(fmt, i, out);
+	}
+
+	static std::string takePrintfArg(PrintfRun& run) {
+		if (run.next_arg >= run.args.size()) return std::string();
+		return run.args[run.next_arg++];
+	}
+
+	static bool isQuotedCharArg(const std::string& text) {
+		return !text.empty() && (text[0] == '\'' || text[0] == '"');
+	}
+
+	static long long quotedCharCode(const std::string& text) {
+		return text.size() > 1 ? static_cast<unsigned char>(text[1]) : 0;
+	}
+
+	static void reportBadNumber(const std::string& text, PrintfRun& run) {
+		std::fprintf(stderr, "wbsh: printf: %s: invalid number\n", text.c_str());
+		run.bad_number = true;
+	}
+
+	static long long printfIntegerArg(const std::string& text, PrintfRun& run) {
+		if (text.empty()) return 0;
+		if (isQuotedCharArg(text)) return quotedCharCode(text);
+
+		long long value = 0;
+		std::size_t parsed = 0;
+		if (!parseLL(text, value, 0, &parsed) || parsed != text.size()) reportBadNumber(text, run);
+		return value;
+	}
+
+	static double printfDoubleArg(const std::string& text, PrintfRun& run) {
+		if (text.empty()) return 0.0;
+		if (isQuotedCharArg(text)) return static_cast<double>(quotedCharCode(text));
+
+		double value = 0.0;
+		std::size_t parsed = 0;
+		if (!parseDouble(text, value, &parsed) || parsed != text.size()) reportBadNumber(text, run);
+		return value;
 	}
 
 	static void appendPrintfDigits(const std::string& fmt, std::size_t& i, std::string& out_spec) {
@@ -265,7 +328,22 @@ namespace wbsh {
 		}
 	}
 
-	static bool parsePrintfConversionSpec(const std::string& fmt, std::size_t& i,
+	static void appendPrintfWidth(const std::string& fmt, std::size_t& i, PrintfRun& run,
+			std::string& out_spec) {
+		if (i < fmt.size() && fmt[i] == '*') {
+			out_spec += std::to_string(printfIntegerArg(takePrintfArg(run), run));
+			++i;
+			return;
+		}
+
+		appendPrintfDigits(fmt, i, out_spec);
+	}
+
+	static void skipLengthModifiers(const std::string& fmt, std::size_t& i) {
+		while (i < fmt.size() && std::strchr("hlLjzt", fmt[i]) != nullptr) ++i;
+	}
+
+	static bool parsePrintfConversionSpec(const std::string& fmt, std::size_t& i, PrintfRun& run,
 			std::string& out_spec) {
 		out_spec = "%";
 		++i;
@@ -273,12 +351,13 @@ namespace wbsh {
 			out_spec.push_back(fmt[i++]);
 		}
 
-		appendPrintfDigits(fmt, i, out_spec);
+		appendPrintfWidth(fmt, i, run, out_spec);
 		if (i < fmt.size() && fmt[i] == '.') {
 			out_spec.push_back(fmt[i++]);
-			appendPrintfDigits(fmt, i, out_spec);
+			appendPrintfWidth(fmt, i, run, out_spec);
 		}
 
+		skipLengthModifiers(fmt, i);
 		if (i >= fmt.size()) return false;
 
 		out_spec.push_back(fmt[i]);
@@ -291,97 +370,171 @@ namespace wbsh {
 		return result + conversion;
 	}
 
-	static void emitPrintfConversion(const std::string& spec, char conv,
-			const std::string& arg_text) {
-		switch (conv) {
+	template <typename Value>
+	static std::string formatValue(const std::string& spec, Value value) {
+		const int length = std::snprintf(nullptr, 0, spec.c_str(), value);
+		if (length <= 0) return std::string();
+
+		std::vector<char> buffer(static_cast<std::size_t>(length) + 1);
+		std::snprintf(buffer.data(), buffer.size(), spec.c_str(), value);
+		return std::string(buffer.data(), static_cast<std::size_t>(length));
+	}
+
+	static std::string formatString(const std::string& spec, const std::string& text) {
+		if (spec.size() == 2) return text;
+		return formatValue(specWithConversion(spec, "s"), text.c_str());
+	}
+
+	static bool isShellSafeChar(char c) {
+		return std::isalnum(static_cast<unsigned char>(c)) != 0
+			|| std::strchr("_-./:=@%+,", c) != nullptr;
+	}
+
+	static std::string shellQuoteBackslash(const std::string& text) {
+		if (text.empty()) return "''";
+
+		std::string quoted;
+		for (const char c : text) {
+			if (!isShellSafeChar(c) && static_cast<unsigned char>(c) < 0x80) quoted.push_back('\\');
+			quoted.push_back(c);
+		}
+
+		return quoted;
+	}
+
+	static std::string formatEscapedArg(const std::string& spec, PrintfRun& run) {
+		std::string expanded;
+		if (!interpretEcho(takePrintfArg(run), expanded)) run.stopped = true;
+		return formatString(spec, expanded);
+	}
+
+	static std::string formatUnsigned(const std::string& spec, char conversion, PrintfRun& run) {
+		const long long value = printfIntegerArg(takePrintfArg(run), run);
+		return formatValue(specWithConversion(spec, std::string("ll") + conversion),
+			static_cast<unsigned long long>(value));
+	}
+
+	static std::string formatCharArg(const std::string& spec, PrintfRun& run) {
+		const std::string text = takePrintfArg(run);
+		return formatValue(spec, text.empty() ? 0 : static_cast<int>(text[0]));
+	}
+
+	static std::string formatPrintfConversion(const std::string& spec, char conversion,
+			PrintfRun& run) {
+		switch (conversion) {
 		case 's':
-			std::fprintf(stdout, spec.c_str(), arg_text.c_str());
-			break;
+			return formatString(spec, takePrintfArg(run));
+		case 'b':
+			return formatEscapedArg(spec, run);
+		case 'q':
+			return formatString(spec, shellQuoteBackslash(takePrintfArg(run)));
 		case 'd':
 		case 'i':
-			std::fprintf(stdout, specWithConversion(spec, "lld").c_str(), toIntOrZero(arg_text));
-			break;
+			return formatValue(specWithConversion(spec, "lld"),
+				printfIntegerArg(takePrintfArg(run), run));
 		case 'u':
-			std::fprintf(stdout, specWithConversion(spec, "llu").c_str(),
-				static_cast<unsigned long long>(toIntOrZero(arg_text)));
-			break;
 		case 'x':
 		case 'X':
 		case 'o':
-			std::fprintf(stdout, specWithConversion(spec, std::string("ll") + conv).c_str(),
-				static_cast<unsigned long long>(toIntOrZero(arg_text)));
-			break;
+			return formatUnsigned(spec, conversion, run);
 		case 'f':
 		case 'F':
 		case 'e':
 		case 'E':
 		case 'g':
 		case 'G':
-			std::fprintf(stdout, spec.c_str(), toDoubleOrZero(arg_text));
-			break;
+		case 'a':
+		case 'A':
+			return formatValue(spec, printfDoubleArg(takePrintfArg(run), run));
 		case 'c':
-			std::fputc(arg_text.empty() ? '\0' : arg_text[0], stdout);
-			break;
+			return formatCharArg(spec, run);
 		case '%':
-			std::fputc('%', stdout);
-			break;
+			return "%";
 		default:
-			writeStdout(spec);
-			break;
+			return spec;
 		}
 	}
 
-	static std::string takePrintfArg(const std::vector<std::string>& args, std::size_t& next) {
-		if (next >= args.size()) return std::string();
-		return args[next++];
-	}
-
-	static void emitPrintfFormatOnce(const std::string& fmt, const std::vector<std::string>& args,
-			std::size_t& next_arg) {
-		for (std::size_t i = 0; i < fmt.size(); ++i) {
+	static void appendFormatOnce(const std::string& fmt, PrintfRun& run) {
+		for (std::size_t i = 0; i < fmt.size() && !run.stopped; ++i) {
 			const char c = fmt[i];
 			if (c == '\\' && i + 1 < fmt.size()) {
-				emitBackslashEscape(fmt[++i]);
+				appendFormatEscape(fmt, i, run.out);
 				continue;
 			}
 
 			if (c != '%') {
-				std::fputc(c, stdout);
+				run.out.push_back(c);
 				continue;
 			}
 
 			const std::size_t spec_start = i;
 			std::string spec;
-			if (!parsePrintfConversionSpec(fmt, i, spec)) {
-				std::fwrite(fmt.data() + spec_start, 1, fmt.size() - spec_start, stdout);
+			if (!parsePrintfConversionSpec(fmt, i, run, spec)) {
+				run.out.append(fmt, spec_start, std::string::npos);
 				return;
 			}
 
-			emitPrintfConversion(spec, fmt[i], takePrintfArg(args, next_arg));
+			run.out += formatPrintfConversion(spec, fmt[i], run);
 		}
 	}
 
-	static int builtin_printf(Executor&, const std::vector<std::string>& args) {
-		if (args.empty()) {
-			printerr("printf: missing format");
+	// Bash printf semantics: emit the format once, then keep cycling
+	// while there are unconsumed args. If a pass consumes nothing
+	// (a literal-only format), stop to avoid an infinite loop.
+	static void appendFormatCycles(const std::string& fmt, PrintfRun& run) {
+		appendFormatOnce(fmt, run);
+		while (!run.stopped && run.next_arg < run.args.size()) {
+			const std::size_t before = run.next_arg;
+			appendFormatOnce(fmt, run);
+			if (run.next_arg == before) break;
+		}
+	}
+
+	static std::size_t parsePrintfTarget(const std::vector<std::string>& args,
+			std::string& target) {
+		std::size_t first = 0;
+		if (args.size() >= 2 && args[0] == "-v") {
+			target = args[1];
+			first = 2;
+		}
+
+		if (first < args.size() && args[first] == "--") ++first;
+		return first;
+	}
+
+	static int storePrintfResult(Executor& exec, const std::string& target,
+			const std::string& text) {
+		if (target.empty()) {
+			writeStdout(text);
+			std::fflush(stdout);
+			return 0;
+		}
+
+		if (exec.env().isReadonly(target)) {
+			printerr("printf: " + target + ": readonly variable");
+			return 1;
+		}
+
+		exec.env().set(target, text);
+		return 0;
+	}
+
+	static int builtin_printf(Executor& exec, const std::vector<std::string>& args) {
+		std::string target;
+		const std::size_t first = parsePrintfTarget(args, target);
+		if (first >= args.size()) {
+			printerr("printf: usage: printf [-v var] format [arguments]");
 			return 2;
 		}
 
-		const std::string& fmt = args[0];
-		std::size_t next_arg = 1;
+		PrintfRun run;
+		run.args.assign(args.begin() + static_cast<std::ptrdiff_t>(first) + 1, args.end());
+		appendFormatCycles(args[first], run);
 
-		// Bash printf semantics: emit the format once, then keep cycling
-		// while there are unconsumed args. If a pass consumes nothing
-		// (a literal-only format), stop to avoid an infinite loop.
-		emitPrintfFormatOnce(fmt, args, next_arg);
-		while (next_arg < args.size()) {
-			const std::size_t before = next_arg;
-			emitPrintfFormatOnce(fmt, args, next_arg);
-			if (next_arg == before) break;
-		}
-
-		std::fflush(stdout);
-		return 0;
+		const int store_status = storePrintfResult(exec, target, run.out);
+		if (store_status != 0) return store_status;
+		return run.bad_number ? 1 : 0;
 	}
 
 	// -L and -P are accepted and make no difference.

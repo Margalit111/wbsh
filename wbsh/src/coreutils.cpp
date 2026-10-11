@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
@@ -33,6 +34,7 @@
 
 #include "awk.h"
 #include "coreutils_internal.h"
+#include "devices.h"
 #include "executor.h"
 #include "inflate.h"
 #include "numparse.h"
@@ -47,7 +49,6 @@ namespace wbsh {
 	static const int         kFallbackConsoleRows    = 24;
 	static const std::size_t kStreamChunk            = 4096;
 	static const std::size_t kTimeTextCapacity       = 256;
-	static const long        kDefaultLineCount       = 10;
 	static const int         kDefaultUserId          = 1000;
 	static const int         kDefaultGroupId         = 1000;
 	static const double      kSeqEpsilon             = 1e-12;
@@ -69,6 +70,11 @@ namespace wbsh {
 	}
 
 	std::FILE* fopenNative(Executor& exec, const std::string& p, const char* mode) {
+		if (isGeneratorDevice(p)) {
+			if (mode[0] == 'r') return fopenGeneratorDevice(p);
+			return openUtf8("NUL", mode);
+		}
+
 		return openUtf8(exec.pathConv().toWin32(p), mode);
 	}
 
@@ -120,7 +126,7 @@ namespace wbsh {
 		return joined;
 	}
 
-	static std::string currentUserName(Executor& exec) {
+	std::string currentUserName(Executor& exec) {
 		std::string user = exec.env().get("USER");
 		if (user.empty()) user = exec.env().get("USERNAME");
 		if (user.empty()) user = "user";
@@ -161,7 +167,17 @@ namespace wbsh {
 #endif
 	}
 
-	static bool queryConsoleSize(int& columns, int& rows) {
+	bool isConsoleStream(std::FILE* stream) {
+#ifdef _WIN32
+		const HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stream)));
+		DWORD mode = 0;
+		return handle != INVALID_HANDLE_VALUE && ::GetConsoleMode(handle, &mode) != 0;
+#else
+		return isatty(fileno(stream)) != 0;
+#endif
+	}
+
+	bool queryConsoleSize(int& columns, int& rows) {
 #ifdef _WIN32
 		const HANDLE handle = ::GetStdHandle(STD_OUTPUT_HANDLE);
 		if (handle == INVALID_HANDLE_VALUE) return false;
@@ -195,6 +211,8 @@ namespace wbsh {
 		bool sort_mtime = false;
 		bool sort_size = false;
 		bool classify = false;
+		bool recursive = false;
+		bool directory_itself = false;
 		bool use_color = false;
 		enum { Auto, Always, Never } color = Auto;
 	};
@@ -466,6 +484,8 @@ namespace wbsh {
 		else if (arg == "--human-readable")                       opts.human = true;
 		else if (arg == "--reverse")                              opts.reverse = true;
 		else if (arg == "--classify")                             opts.classify = true;
+		else if (arg == "--recursive")                            opts.recursive = true;
+		else if (arg == "--directory")                            opts.directory_itself = true;
 		else return false;
 		return true;
 	}
@@ -481,6 +501,8 @@ namespace wbsh {
 			case 't': opts.sort_mtime = true; break;
 			case 'S': opts.sort_size = true; break;
 			case 'F': opts.classify = true; break;
+			case 'R': opts.recursive = true; break;
+			case 'd': opts.directory_itself = true; break;
 			default:
 				std::fprintf(stderr, "wbsh: ls: unknown option -%c\n", cluster[k]);
 				return false;
@@ -546,6 +568,9 @@ namespace wbsh {
 		std::fprintf(stdout, "%s:\n", path.c_str());
 	}
 
+	static int listSubdirectories(Executor& exec, const LsOpts& opts, const std::string& path,
+	                              const std::vector<LsEntry>& items);
+
 	static int listOnePath(Executor& exec, const LsOpts& opts, const std::string& path,
 	                       LsHeader header) {
 		const fs::path target = toNative(exec, path);
@@ -557,7 +582,8 @@ namespace wbsh {
 		}
 
 		std::vector<LsEntry> items;
-		if (fs::is_directory(status)) {
+		const bool expand = fs::is_directory(status) && !opts.directory_itself;
+		if (expand) {
 			printLsHeader(path, header);
 			if (!collectLsDirectoryEntries(target, opts, path, items)) return 1;
 		} else {
@@ -568,11 +594,27 @@ namespace wbsh {
 
 		sortEntries(items, opts);
 		emitLsItems(items, opts, exec);
+		if (expand && opts.recursive) return listSubdirectories(exec, opts, path, items);
 		return 0;
 	}
 
-	static LsHeader lsHeaderFor(std::size_t index, std::size_t path_count) {
-		if (path_count <= 1) return LsHeader::None;
+	// ls -R walks real directories only; a symbolic link to one is listed
+	// but not entered, so a link cycle cannot recurse forever.
+	static int listSubdirectories(Executor& exec, const LsOpts& opts, const std::string& path,
+	                              const std::vector<LsEntry>& items) {
+		int status = 0;
+		for (const LsEntry& entry : items) {
+			if (!entry.is_dir || entry.is_symlink) continue;
+			const std::string child = (!path.empty() && path.back() == '/') ? path + entry.name
+				: path + "/" + entry.name;
+			if (listOnePath(exec, opts, child, LsHeader::Subsequent) != 0) status = 1;
+		}
+
+		return status;
+	}
+
+	static LsHeader lsHeaderFor(std::size_t index, std::size_t path_count, bool recursive) {
+		if (path_count <= 1 && !recursive) return LsHeader::None;
 		if (index == 0) return LsHeader::First;
 		return LsHeader::Subsequent;
 	}
@@ -585,7 +627,7 @@ namespace wbsh {
 
 		int status = 0;
 		for (std::size_t i = 0; i < paths.size(); ++i) {
-			const LsHeader header = lsHeaderFor(i, paths.size());
+			const LsHeader header = lsHeaderFor(i, paths.size(), opts.recursive);
 			if (listOnePath(exec, opts, paths[i], header) != 0) status = 1;
 		}
 
@@ -666,10 +708,10 @@ namespace wbsh {
 		}
 	}
 
-	static void catStdin(const CatOptions& opts, CatEmitState& state) {
+	static void catStream(std::FILE* stream, const CatOptions& opts, CatEmitState& state) {
 		char chunk[kStreamChunk];
 		for (;;) {
-			const std::size_t got = std::fread(chunk, 1, sizeof(chunk), stdin);
+			const std::size_t got = std::fread(chunk, 1, sizeof(chunk), stream);
 			if (got == 0) break;
 			catEmitChunk(chunk, got, opts, state);
 		}
@@ -677,24 +719,14 @@ namespace wbsh {
 
 	static int catStreamFile(Executor& exec, const std::string& name,
 	                         const CatOptions& opts, CatEmitState& state) {
-		if (name == "-") {
-			catStdin(opts, state);
-			return 0;
-		}
-
-		std::ifstream in(toNative(exec, name), std::ios::binary);
-		if (!in) {
+		std::FILE* stream = openInputOrStdin(exec, name);
+		if (stream == nullptr) {
 			perr("cat", withErrno(name));
 			return 1;
 		}
 
-		char chunk[kStreamChunk];
-		while (in) {
-			in.read(chunk, sizeof(chunk));
-			const std::streamsize got = in.gcount();
-			if (got > 0) catEmitChunk(chunk, static_cast<std::size_t>(got), opts, state);
-		}
-
+		catStream(stream, opts, state);
+		closeUnlessStdin(stream);
 		return 0;
 	}
 
@@ -1063,142 +1095,6 @@ namespace wbsh {
 		return status;
 	}
 
-	// Returns 0 when a value was consumed (`i` advanced past it), 1 when
-	// args[i] is not this flag at all, -1 when the value is malformed.
-	static int parseNumFlag(const std::vector<std::string>& args, const char* short_flag,
-	                        std::size_t& i, long& value) {
-		const std::string& arg = args[i];
-		const bool attached = arg.size() > 2 && arg[0] == '-' && arg[1] == short_flag[0]
-			&& isDigitChar(arg[2]);
-		if (attached) {
-			int parsed = 0;
-			if (!parseInt(arg.substr(2), parsed)) return -1;
-			value = parsed;
-			++i;
-			return 0;
-		}
-
-		if (arg == short_flag || arg == std::string("-") + short_flag) {
-			if (i + 1 >= args.size()) return -1;
-			int parsed = 0;
-			if (!parseInt(args[i + 1], parsed)) return -1;
-			value = parsed;
-			i += 2;
-			return 0;
-		}
-
-		return 1;
-	}
-
-	static bool parseLegacyLineCount(const char* cmd, const std::string& arg, long& count) {
-		int parsed = 0;
-		if (!parseInt(arg.substr(1), parsed)) {
-			perr(cmd, "bad N");
-			return false;
-		}
-
-		count = parsed;
-		return true;
-	}
-
-	static int parseLineCountArgs(const char* cmd, const std::vector<std::string>& args,
-	                              long& count, std::vector<std::string>& files) {
-		for (std::size_t i = 0; i < args.size(); ) {
-			const std::string& arg = args[i];
-			if (arg.rfind("-n", 0) == 0) {
-				std::size_t next = i;
-				const int parsed = parseNumFlag(args, "n", next, count);
-				if (parsed == 0) {
-					i = next;
-					continue;
-				}
-
-				if (parsed == -1) {
-					perr(cmd, "bad -n value");
-					return 1;
-				}
-			}
-
-			if (arg == "--") {
-				takeRemainingOperands(args, i + 1, files);
-				break;
-			}
-
-			if (arg.size() > 1 && arg[0] == '-' && isDigitChar(arg[1])) {
-				if (!parseLegacyLineCount(cmd, arg, count)) return 1;
-				++i;
-				continue;
-			}
-
-			files.push_back(arg);
-			++i;
-		}
-
-		if (files.empty()) files.push_back("-");
-		return 0;
-	}
-
-	static void printFirstLines(std::FILE* stream, long count) {
-		long printed = 0;
-		int c = EOF;
-		while (printed < count && (c = std::fgetc(stream)) != EOF) {
-			std::fputc(c, stdout);
-			if (c == '\n') ++printed;
-		}
-	}
-
-	static int builtin_head(Executor& exec, const std::vector<std::string>& args) {
-		long count = kDefaultLineCount;
-		std::vector<std::string> files;
-		if (parseLineCountArgs("head", args, count, files) != 0) return 1;
-
-		int status = 0;
-		for (const auto& file : files) {
-			std::FILE* stream = openInputOrStdin(exec, file);
-			if (stream == nullptr) {
-				perr("head", withErrno(file));
-				status = 1;
-				continue;
-			}
-
-			printFirstLines(stream, count);
-			closeUnlessStdin(stream);
-		}
-
-		std::fflush(stdout);
-		return status;
-	}
-
-	static void printLastLines(const std::vector<std::string>& lines, long count) {
-		const std::size_t wanted = static_cast<std::size_t>(count);
-		const std::size_t start = lines.size() > wanted ? lines.size() - wanted : 0;
-		for (std::size_t k = start; k < lines.size(); ++k) {
-			std::fputs(lines[k].c_str(), stdout);
-			std::fputc('\n', stdout);
-		}
-	}
-
-	static int builtin_tail(Executor& exec, const std::vector<std::string>& args) {
-		long count = kDefaultLineCount;
-		std::vector<std::string> files;
-		if (parseLineCountArgs("tail", args, count, files) != 0) return 1;
-
-		int status = 0;
-		for (const auto& file : files) {
-			std::vector<std::string> lines;
-			if (!readAllLines(exec, file, lines)) {
-				perr("tail", withErrno(file));
-				status = 1;
-				continue;
-			}
-
-			printLastLines(lines, count);
-		}
-
-		std::fflush(stdout);
-		return status;
-	}
-
 	static void appendWcCount(std::string& out, std::uintmax_t value) {
 		if (!out.empty()) out += " ";
 		char text[64];
@@ -1360,6 +1256,27 @@ namespace wbsh {
 
 	using EnvPair = std::pair<std::string, std::string>;
 
+	namespace env_detail {
+
+		struct EnvOptions {
+			bool clear_all = false;
+			bool null_terminated = false;
+			std::vector<std::string> removed;
+			std::vector<EnvPair> overrides;
+			std::vector<std::string> command;
+		};
+
+		struct HiddenVar {
+			std::string name;
+			std::string value;
+			bool exported = false;
+		};
+
+	}  // namespace env_detail
+
+	using env_detail::EnvOptions;
+	using env_detail::HiddenVar;
+
 	static bool isEnvAssignment(const std::string& arg) {
 		if (arg.find('=') == std::string::npos) return false;
 		return std::isalpha(static_cast<unsigned char>(arg[0])) != 0 || arg[0] == '_';
@@ -1375,44 +1292,182 @@ namespace wbsh {
 		all.push_back(assignment);
 	}
 
-	static int builtin_env(Executor& exec, const std::vector<std::string>& args) {
-		std::vector<EnvPair> overrides;
-		std::vector<std::string> command;
-		for (const auto& arg : args) {
-			if (command.empty() && isEnvAssignment(arg)) {
-				const std::size_t eq = arg.find('=');
-				overrides.emplace_back(arg.substr(0, eq), arg.substr(eq + 1));
-			} else {
-				command.push_back(arg);
+	static bool parseEnvOption(const std::vector<std::string>& args, std::size_t& i,
+	                           EnvOptions& options) {
+		const std::string& arg = args[i];
+		if (arg == "-i" || arg == "-" || arg == "--ignore-environment") {
+			options.clear_all = true;
+			return true;
+		}
+
+		if (arg == "-0" || arg == "--null") {
+			options.null_terminated = true;
+			return true;
+		}
+
+		if ((arg == "-u" || arg == "--unset") && i + 1 < args.size()) {
+			options.removed.push_back(args[++i]);
+			return true;
+		}
+
+		if (arg.size() > 2 && arg.compare(0, 2, "-u") == 0) {
+			options.removed.push_back(arg.substr(2));
+			return true;
+		}
+
+		return false;
+	}
+
+	static bool parseEnvArgs(const std::vector<std::string>& args, EnvOptions& options) {
+		std::size_t i = 0;
+		for (; i < args.size() && startsWithDash(args[i]); ++i) {
+			if (args[i] == "--") {
+				++i;
+				break;
+			}
+
+			if (parseEnvOption(args, i, options)) continue;
+			perr("env", "unknown option: " + args[i]);
+			return false;
+		}
+
+		for (; i < args.size() && isEnvAssignment(args[i]); ++i) {
+			const std::size_t eq = args[i].find('=');
+			options.overrides.emplace_back(args[i].substr(0, eq), args[i].substr(eq + 1));
+		}
+
+		takeRemainingOperands(args, i, options.command);
+		return true;
+	}
+
+	static bool isRemovedName(const EnvOptions& options, const std::string& name) {
+		return std::find(options.removed.begin(), options.removed.end(), name)
+			!= options.removed.end();
+	}
+
+	static std::vector<EnvPair> visibleEnvironment(Executor& exec, const EnvOptions& options) {
+		std::vector<EnvPair> all;
+		if (!options.clear_all) {
+			for (const auto& entry : exec.env().vars()) {
+				if (!exec.env().isExported(entry.first)) continue;
+				if (isRemovedName(options, entry.first)) continue;
+				all.push_back(entry);
 			}
 		}
 
-		if (!command.empty()) {
-			std::fprintf(stderr, "wbsh: env: running with overrides not yet implemented; "
-				"set then call directly\n");
-			return 1;
-		}
-
-		std::vector<EnvPair> all(exec.env().vars().begin(), exec.env().vars().end());
-		for (const auto& assignment : overrides) applyEnvOverride(all, assignment);
+		for (const auto& assignment : options.overrides) applyEnvOverride(all, assignment);
 		std::sort(all.begin(), all.end());
+		return all;
+	}
 
-		for (const auto& entry : all) {
-			if (!exec.env().isExported(entry.first)) continue;
-			std::printf("%s=%s\n", entry.first.c_str(), entry.second.c_str());
+	static int printEnvironment(Executor& exec, const EnvOptions& options) {
+		const char terminator = options.null_terminated ? '\0' : '\n';
+		for (const auto& entry : visibleEnvironment(exec, options)) {
+			std::printf("%s=%s", entry.first.c_str(), entry.second.c_str());
+			std::fputc(terminator, stdout);
 		}
 
+		std::fflush(stdout);
 		return 0;
 	}
 
-	static bool parseSleepSeconds(const std::string& arg, double& seconds) {
+	static bool hidesVariable(const EnvOptions& options, const std::string& name, bool exported) {
+		if (isRemovedName(options, name)) return true;
+		return options.clear_all && exported;
+	}
+
+	static std::vector<HiddenVar> hideEnvironment(Environment& env, const EnvOptions& options) {
+		std::vector<HiddenVar> hidden;
+		for (const auto& entry : env.vars()) {
+			const bool exported = env.isExported(entry.first);
+			if (!hidesVariable(options, entry.first, exported)) continue;
+			hidden.push_back(HiddenVar{ entry.first, entry.second, exported });
+		}
+
+		for (const HiddenVar& var : hidden) {
+			if (isRemovedName(options, var.name)) env.unset(var.name);
+			else                                  env.unexportVar(var.name);
+		}
+
+		return hidden;
+	}
+
+	static void restoreEnvironment(Environment& env, const std::vector<HiddenVar>& hidden) {
+		for (const HiddenVar& var : hidden) {
+			env.forceSet(var.name, var.value);
+			if (var.exported) env.exportVar(var.name);
+		}
+	}
+
+	static int builtin_env(Executor& exec, const std::vector<std::string>& args) {
+		EnvOptions options;
+		if (!parseEnvArgs(args, options)) return 125;
+		if (options.command.empty()) return printEnvironment(exec, options);
+
+		const std::vector<HiddenVar> hidden = hideEnvironment(exec.env(), options);
+		const int status = exec.runResolvedCommand(options.command, options.overrides);
+		restoreEnvironment(exec.env(), hidden);
+		return status;
+	}
+	static bool fixedSizeSuffix(const std::string& suffix, unsigned long long& multiplier) {
+		if (suffix.empty() || suffix == "c") multiplier = 1;
+		else if (suffix == "w")              multiplier = 2;
+		else if (suffix == "b")              multiplier = 512;
+		else return false;
+		return true;
+	}
+
+	static bool sizeSuffixPower(char letter, int& power) {
+		static const char kLetters[] = "KMGTPE";
+		const int upper = std::toupper(static_cast<unsigned char>(letter));
+		const char* found = std::strchr(kLetters, upper);
+		if (found == nullptr || upper == '\0') return false;
+
+		power = static_cast<int>(found - kLetters) + 1;
+		return true;
+	}
+
+	static bool sizeSuffixMultiplier(const std::string& suffix, unsigned long long& multiplier) {
+		if (fixedSizeSuffix(suffix, multiplier)) return true;
+
+		int power = 0;
+		if (!sizeSuffixPower(suffix[0], power)) return false;
+
+		const std::string rest = suffix.substr(1);
+		const bool decimal = rest == "B";
+		if (!rest.empty() && !decimal && rest != "iB") return false;
+
+		const unsigned long long base = decimal ? 1000ULL : 1024ULL;
+		multiplier = 1;
+		for (int k = 0; k < power; ++k) multiplier *= base;
+		return true;
+	}
+
+	bool parseByteSize(const std::string& text, unsigned long long& bytes) {
+		std::size_t digits = 0;
+		while (digits < text.size() && isDigitChar(text[digits])) ++digits;
+		if (digits == 0) return false;
+
+		unsigned long long value = 0;
+		if (!parseULL(text.substr(0, digits), value)) return false;
+
+		unsigned long long multiplier = 1;
+		if (!sizeSuffixMultiplier(text.substr(digits), multiplier)) return false;
+		if (value != 0 && multiplier > ~0ULL / value) return false;
+
+		bytes = value * multiplier;
+		return true;
+	}
+
+	bool parseDurationSeconds(const std::string& arg, double& seconds) {
 		const char suffix = arg.empty() ? '\0' : arg.back();
-		const bool has_unit = suffix == 's' || suffix == 'm' || suffix == 'h';
+		const bool has_unit = suffix == 's' || suffix == 'm' || suffix == 'h' || suffix == 'd';
 		const std::string number = has_unit ? arg.substr(0, arg.size() - 1) : arg;
 		if (!parseDouble(number, seconds)) return false;
 
 		if (suffix == 'm') seconds *= 60.0;
 		else if (suffix == 'h') seconds *= 3600.0;
+		else if (suffix == 'd') seconds *= 86400.0;
 		return true;
 	}
 
@@ -1423,7 +1478,7 @@ namespace wbsh {
 		}
 
 		double seconds = 0.0;
-		if (!parseSleepSeconds(args[0], seconds)) {
+		if (!parseDurationSeconds(args[0], seconds)) {
 			perr("sleep", args[0] + ": invalid time interval");
 			return 1;
 		}
@@ -1927,7 +1982,7 @@ namespace wbsh {
 				continue;
 			}
 
-			if (startsWithDash(arg)) continue;
+			if (isOptionNotStdin(arg)) continue;
 			opts.files.push_back(arg);
 		}
 
@@ -1969,22 +2024,22 @@ namespace wbsh {
 			return 2;
 		}
 
-		std::FILE* first = fopenNative(exec, opts.files[0], "rb");
+		std::FILE* first = openInputOrStdin(exec, opts.files[0]);
 		if (first == nullptr) {
 			if (!opts.quiet) perr("cmp", withErrno(opts.files[0]));
 			return 2;
 		}
 
-		std::FILE* second = fopenNative(exec, opts.files[1], "rb");
+		std::FILE* second = openInputOrStdin(exec, opts.files[1]);
 		if (second == nullptr) {
-			std::fclose(first);
+			closeUnlessStdin(first);
 			if (!opts.quiet) perr("cmp", withErrno(opts.files[1]));
 			return 2;
 		}
 
 		const int status = compareStreams(first, second, opts);
-		std::fclose(first);
-		std::fclose(second);
+		closeUnlessStdin(first);
+		closeUnlessStdin(second);
 		return status;
 	}
 
@@ -1997,6 +2052,8 @@ namespace wbsh {
 		struct DiffOptions {
 			bool brief = false;
 			bool unified = false;
+			bool recursive = false;
+			bool new_file = false;
 			int context = 3;
 			std::vector<std::string> files;
 		};
@@ -2020,6 +2077,32 @@ namespace wbsh {
 		using LcsTable = std::vector<std::vector<int>>;
 	}  // namespace diff_internal
 
+	static bool applyDiffCluster(const std::string& arg, diff_internal::DiffOptions& opts) {
+		if (arg == "--recursive") {
+			opts.recursive = true;
+			return true;
+		}
+
+		if (arg == "--new-file") {
+			opts.new_file = true;
+			return true;
+		}
+
+		if (arg.size() < 2 || arg[0] != '-' || arg[1] == '-' || arg[1] == 'U') return false;
+		for (std::size_t k = 1; k < arg.size(); ++k) {
+			if (std::strchr("rNuq", arg[k]) == nullptr) return false;
+		}
+
+		for (std::size_t k = 1; k < arg.size(); ++k) {
+			if (arg[k] == 'r') opts.recursive = true;
+			if (arg[k] == 'N') opts.new_file = true;
+			if (arg[k] == 'u') opts.unified = true;
+			if (arg[k] == 'q') opts.brief = true;
+		}
+
+		return true;
+	}
+
 	static diff_internal::DiffOptions parseDiffArgs(const std::vector<std::string>& args) {
 		diff_internal::DiffOptions opts;
 		for (std::size_t i = 0; i < args.size(); ++i) {
@@ -2033,6 +2116,8 @@ namespace wbsh {
 				opts.unified = true;
 				continue;
 			}
+
+			if (applyDiffCluster(arg, opts)) continue;
 
 			if (arg.size() > 2 && arg.compare(0, 2, "-U") == 0) {
 				opts.unified = true;
@@ -2238,27 +2323,138 @@ namespace wbsh {
 		return 1;
 	}
 
-	static int builtin_diff(Executor& exec, const std::vector<std::string>& args) {
-		const diff_internal::DiffOptions opts = parseDiffArgs(args);
-		if (opts.files.size() < 2) {
-			perr("diff", "usage: diff [-q] FILE1 FILE2");
-			return 2;
-		}
+	static bool loadDiffSide(Executor& exec, const std::string& path, bool missing_is_empty,
+	                         diff_internal::Lines& lines) {
+		if (readAllLines(exec, path, lines)) return true;
+		if (missing_is_empty) return true;
+
+		perr("diff", withErrno(path));
+		return false;
+	}
+
+	// The "diff -r a/x b/x" line that introduces each pair echoes the flags
+	// that change the output, as GNU diff does.
+	static std::string diffFlagText(const diff_internal::DiffOptions& opts) {
+		std::string flags;
+		if (opts.recursive) flags += 'r';
+		if (opts.new_file) flags += 'N';
+		if (opts.unified) flags += 'u';
+		return flags.empty() ? std::string() : " -" + flags;
+	}
+
+	static int diffFiles(Executor& exec, const diff_internal::DiffOptions& base,
+	                     const std::string& first, const std::string& second, bool announce) {
+		diff_internal::DiffOptions opts = base;
+		opts.files = { first, second };
 
 		diff_internal::Lines left;
 		diff_internal::Lines right;
-		if (!readAllLines(exec, opts.files[0], left)) return 2;
-		if (!readAllLines(exec, opts.files[1], right)) return 2;
+		if (!loadDiffSide(exec, first, opts.new_file, left)) return 2;
+		if (!loadDiffSide(exec, second, opts.new_file, right)) return 2;
 		if (left == right) return 0;
 
 		if (opts.brief) {
-			std::printf("Files %s and %s differ\n", opts.files[0].c_str(), opts.files[1].c_str());
+			std::printf("Files %s and %s differ\n", first.c_str(), second.c_str());
 			return 1;
 		}
+
+		if (announce) std::printf("diff%s %s %s\n", diffFlagText(opts).c_str(), first.c_str(),
+			second.c_str());
 
 		const diff_internal::LcsTable table = buildLcsTable(left, right);
 		if (opts.unified) return emitUnifiedDiff(left, right, table, opts);
 		return emitNormalDiff(left, right, table);
+	}
+
+	static std::set<std::string> directoryNames(Executor& exec, const std::string& directory) {
+		std::set<std::string> names;
+		std::error_code ec;
+		const fs::path native = toNative(exec, directory);
+		for (fs::directory_iterator it(native, ec), end; !ec && it != end; it.increment(ec)) {
+			names.insert(pathToUtf8(it->path().filename()));
+		}
+
+		return names;
+	}
+
+	static std::string joinDiffPath(const std::string& directory, const std::string& name) {
+		if (!directory.empty() && directory.back() == '/') return directory + name;
+		return directory + "/" + name;
+	}
+
+	static int diffDirectories(Executor& exec, const diff_internal::DiffOptions& opts,
+	                           const std::string& first, const std::string& second);
+
+	static int diffDirectoryEntry(Executor& exec, const diff_internal::DiffOptions& opts,
+	                              const std::string& first, const std::string& second) {
+		std::error_code ec;
+		const bool first_exists = fs::exists(toNative(exec, first), ec);
+		const bool second_exists = fs::exists(toNative(exec, second), ec);
+		const bool first_dir = fs::is_directory(toNative(exec, first), ec);
+		const bool second_dir = fs::is_directory(toNative(exec, second), ec);
+		const bool one_sided = !first_exists || !second_exists;
+		if (one_sided && !(opts.new_file && !first_dir && !second_dir)) {
+			const std::string& present = first_exists ? first : second;
+			const std::size_t slash = present.find_last_of('/');
+			std::printf("Only in %s: %s\n", present.substr(0, slash).c_str(),
+				present.substr(slash + 1).c_str());
+			return 1;
+		}
+
+		if (first_dir && second_dir) {
+			if (opts.recursive) return diffDirectories(exec, opts, first, second);
+			std::printf("Common subdirectories: %s and %s\n", first.c_str(), second.c_str());
+			return 0;
+		}
+
+		if (first_dir != second_dir) {
+			std::printf("File %s is a %s while file %s is a %s\n", first.c_str(),
+				first_dir ? "directory" : "regular file", second.c_str(),
+				second_dir ? "directory" : "regular file");
+			return 1;
+		}
+
+		return diffFiles(exec, opts, first, second, true);
+	}
+
+	static int diffDirectories(Executor& exec, const diff_internal::DiffOptions& opts,
+	                           const std::string& first, const std::string& second) {
+		std::set<std::string> names = directoryNames(exec, first);
+		const std::set<std::string> others = directoryNames(exec, second);
+		names.insert(others.begin(), others.end());
+
+		int status = 0;
+		for (const std::string& name : names) {
+			const int entry_status = diffDirectoryEntry(exec, opts, joinDiffPath(first, name),
+				joinDiffPath(second, name));
+			status = (std::max)(status, entry_status);
+		}
+
+		std::fflush(stdout);
+		return status;
+	}
+
+	static std::string baseNameOf(const std::string& path) {
+		const std::size_t slash = path.find_last_of("/\\");
+		return slash == std::string::npos ? path : path.substr(slash + 1);
+	}
+
+	static int builtin_diff(Executor& exec, const std::vector<std::string>& args) {
+		const diff_internal::DiffOptions opts = parseDiffArgs(args);
+		if (opts.files.size() < 2) {
+			perr("diff", "usage: diff [-qrNu] FILE1 FILE2");
+			return 2;
+		}
+
+		std::string first = opts.files[0];
+		std::string second = opts.files[1];
+		std::error_code ec;
+		const bool first_dir = fs::is_directory(toNative(exec, first), ec);
+		const bool second_dir = fs::is_directory(toNative(exec, second), ec);
+		if (first_dir && second_dir) return diffDirectories(exec, opts, first, second);
+		if (first_dir) first = joinDiffPath(first, baseNameOf(second));
+		if (second_dir) second = joinDiffPath(second, baseNameOf(first));
+		return diffFiles(exec, opts, first, second, false);
 	}
 
 	static std::uintmax_t treeSize(const fs::path& path, std::error_code& ec) {
@@ -3020,8 +3216,6 @@ namespace wbsh {
 		exec.registerBuiltin("cp",       builtin_cp);
 		exec.registerBuiltin("mv",       builtin_mv);
 		exec.registerBuiltin("touch",    builtin_touch);
-		exec.registerBuiltin("head",     builtin_head);
-		exec.registerBuiltin("tail",     builtin_tail);
 		exec.registerBuiltin("wc",       builtin_wc);
 		exec.registerBuiltin("stat",     builtin_stat);
 		exec.registerBuiltin("chmod",    builtin_chmod);
@@ -3058,10 +3252,25 @@ namespace wbsh {
 
 	void registerCoreutils(Executor& exec) {
 		registerFileBuiltins(exec);
+		registerHeadTailBuiltins(exec);
 		registerTextBuiltins(exec);
 		registerEncodingBuiltins(exec);
+		registerDumpBuiltins(exec);
 		registerArchiveBuiltins(exec);
+		registerCompressBuiltins(exec);
+		registerTarBuiltin(exec);
+		registerPatchBuiltin(exec);
+		registerPagerBuiltins(exec);
+		registerWgetBuiltin(exec);
+		registerMiscBuiltins(exec);
+		registerCpioBuiltins(exec);
+		registerSedBuiltin(exec);
+		registerGrepBuiltins(exec);
 		registerSystemBuiltins(exec);
+		registerProcessBuiltins(exec);
+		registerSystemExtraBuiltins(exec);
+		registerFileOpsBuiltins(exec);
+		registerFilterBuiltins(exec);
 		registerBcBuiltin(exec);
 		registerHashBuiltins(exec);
 		registerCurlBuiltin(exec);

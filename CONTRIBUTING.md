@@ -48,7 +48,9 @@ get the shape of the codebase:
 | Builtins | `wbsh/src/builtins.cpp` | Shell builtins (`cd`, `export`, `declare`, `read`, `trap`, `getopts`, `complete`, …). |
 | Coreutils | `wbsh/src/coreutils.cpp` + `coreutils_*.cpp` | Bundled `ls`/`grep`/`sed`/`awk`/`tar`/… Split per family; see "The coreutils split pattern" below. |
 | Awk | `wbsh/src/awk.cpp/h` | Self-contained awk implementation invoked by the `awk` coreutil. |
-| Inflate | `wbsh/src/inflate.cpp/h` | DEFLATE decoder used by `gunzip`, `zcat`, `unzip`. |
+| Codecs | `wbsh/src/inflate.cpp/h`, `deflate.cpp/h`, `bzip2.cpp/h`, `xz.cpp/h`, `lzw.cpp/h`, `huffman.cpp/h`, `codecs.cpp/h` | DEFLATE both ways, bzip2 both ways, xz / lzma and .Z decoding, the shared length-limited Huffman builder, and `codecs.h`: format detection plus one decompress / compress entry point for `tar` and the compressor commands. |
+| Regex | `wbsh/src/posixregex.cpp/h` | POSIX BRE / ERE (with GNU `\w \s \b \< \>` and back-references) translated to ECMAScript, because MSVC's basic / extended grammars reject those. Used by `grep` and `sed`. |
+| Devices | `wbsh/src/devices.cpp/h` | Pipe-backed `/dev/zero`, `/dev/random`, `/dev/urandom`, `/dev/full` for redirections and the coreutils' file opening. |
 | CLI | `wbsh/src/main.cpp`, `wbsh/src/script.cpp` | Entry point: UTF-8 argv decoding, flag dispatch, the non-interactive run / dump driver. |
 | REPL | `wbsh/src/repl.cpp`, `wbsh/src/lineedit.cpp` | Interactive loop: console / VT mode setup, prompt expansion, raw-mode line editor (history, completion, `Ctrl-R`, inline predictions). |
 | Setup | `wbsh/src/setup.cpp` | Startup environment seeding: registry PATH merge, git / docker install discovery, `WBSH_*` state inheritance from a parent wbsh. |
@@ -72,8 +74,13 @@ Two cross-cutting interfaces are worth knowing about up-front:
 
 Bundled utilities live in per-family files: `coreutils.cpp` (file /
 system utilities plus the shared helpers), `coreutils_text.cpp`,
-`coreutils_archive.cpp`, `coreutils_encoding.cpp`, `coreutils_bc.cpp`,
-`coreutils_curl.cpp`, `coreutils_hash.cpp`. Follow the same pattern when
+`coreutils_grep.cpp`, `coreutils_sed.cpp`, `coreutils_headtail.cpp`,
+`coreutils_filter.cpp`, `coreutils_encoding.cpp`, `coreutils_dump.cpp`,
+`coreutils_hash.cpp`, `coreutils_archive.cpp` (zip), `coreutils_tar.cpp`,
+`coreutils_compress.cpp`, `coreutils_cpio.cpp`, `coreutils_fileops.cpp`,
+`coreutils_patch.cpp`, `coreutils_process.cpp`, `coreutils_system.cpp`,
+`coreutils_misc.cpp`, `coreutils_pager.cpp`, `coreutils_bc.cpp`,
+`coreutils_curl.cpp`, `coreutils_wget.cpp`. Follow the same pattern when
 adding a new group:
 
 1. New file `wbsh/src/coreutils_<group>.cpp`. Put its file-local helpers in a
