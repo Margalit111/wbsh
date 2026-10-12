@@ -898,21 +898,43 @@ namespace wbsh {
 		return {};
 	}
 
-	Word Expander::applyTildeExpansion(const Word& w) {
-		Word out = w;
-		if (out.segments.empty()) return out;
+Word Expander::applyTildeExpansion(const Word& w) {
+    Word out = w;
+    if (out.segments.empty()) return out;
 
-		WordSegment& first = out.segments[0];
-		if (first.kind != WordSegment::Kind::Literal) return out;
-		if (first.text.empty() || first.text[0] != '~') return out;
+    for (auto& seg : out.segments) {
+        if (seg.kind != WordSegment::Kind::Literal) continue;
+        if (seg.text.empty()) continue;
 
-		const std::size_t end = tildePrefixEnd(first.text);
-		const std::string replacement = tildeReplacement(env_, first.text.substr(1, end - 1));
-		if (replacement.empty()) return out;
+        std::string newText;
+        std::size_t i = 0;
+        const std::string& text = seg.text;
+        const std::size_t len = text.length();
 
-		first.text = replacement + first.text.substr(end);
-		return out;
-	}
+        while (i < len) {
+            bool isStartOrAfterColon = (i == 0 || text[i - 1] == ':');
+
+            if (isStartOrAfterColon && text[i] == '~') {
+                std::size_t prefixEnd = tildePrefixEnd(text.substr(i));
+                std::string tildeUser = text.substr(i + 1, prefixEnd - 1);
+                std::string replacement = tildeReplacement(env_, tildeUser);
+
+                if (!replacement.empty()) {
+                    newText += replacement;
+                    i += prefixEnd;
+                    continue;
+                }
+            }
+
+            newText += text[i];
+            i++;
+        }
+
+        seg.text = newText;
+    }
+
+    return out;
+}
 
 	bool Expander::isSpecialParam1(char c) const {
 		return c == '?' || c == '$' || c == '!' || c == '#'
