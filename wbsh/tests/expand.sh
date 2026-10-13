@@ -36,3 +36,16 @@ echo no-such-pattern*
 # 9. Empty-quoted survives
 echo before "" after
 echo before $undef after
+
+# 10. Tilde expansion after colon and regression tests
+y=a:~/b
+echo "$y"
+echo a:~
+x="foo"
+echo "$x"~
+echo host:~/path
+echo "$f"~
+case "q:~" in *:~) echo "match";; esac
+cat <<END:~
+heredoc content
+END

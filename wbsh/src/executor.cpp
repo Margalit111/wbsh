@@ -965,7 +965,8 @@ namespace wbsh {
 	                                             const std::vector<Assignment>& assignments) {
 		NameValueList temp_env;
 		for (const auto& assignment : assignments) {
-			std::string value = expander.expandStringValue(assignment.value);
+			Word tilded = expander.applyTildeExpansion(assignment.value, true);
+			std::string value = expander.quoteRemove(expander.renderWord(tilded));
 			if (expander.failed()) {
 				expander.takeError();
 				continue;
@@ -1303,7 +1304,8 @@ namespace wbsh {
 	                                                 const Assignment& assignment) {
 		Executor::ScalarAssign scalar;
 		scalar.name = assignment.name;
-		scalar.value = expander.expandStringValue(assignment.value);
+		Word tilded = expander.applyTildeExpansion(assignment.value, true);
+		scalar.value = expander.quoteRemove(expander.renderWord(tilded));
 		scalar.append = assignment.append;
 		return scalar;
 	}

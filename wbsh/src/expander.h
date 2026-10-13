@@ -280,7 +280,7 @@ namespace wbsh {
 		bool        isSpecialParam1(char c) const;
 	private:
 
-		Word applyTildeExpansion(const Word& w);
+		Word applyTildeExpansion(const Word& w, bool allowColonTilde = false);
 
 		std::vector<Tagged> splitWords(const Tagged& t);
 		std::vector<std::string> globExpand(const Tagged& t);

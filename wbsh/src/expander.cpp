@@ -883,8 +883,8 @@ namespace wbsh {
 		return out;
 	}
 
-	static std::size_t tildePrefixEnd(const std::string& text) {
-		std::size_t end = 1;
+	static std::size_t tildePrefixEnd(const std::string& text, std::size_t start) {
+		std::size_t end = start + 1;
 		while (end < text.size() && text[end] != '/' && text[end] != ':') ++end;
 		return end;
 	}
@@ -898,39 +898,61 @@ namespace wbsh {
 		return {};
 	}
 
-Word Expander::applyTildeExpansion(const Word& w) {
+bool Expander::isValidTildePosition(const Word& w, std::size_t segIndex, std::size_t charIndex) const {
+    if (charIndex == 0) {
+        if (segIndex == 0) return true;
+        const auto& prevSeg = w.segments[segIndex - 1];
+        if (prevSeg.kind == WordSegment::Kind::Literal && !prevSeg.text.empty()) {
+            return prevSeg.text.back() == ':';
+        }
+        return false;
+    }
+    const auto& seg = w.segments[segIndex];
+    return seg.text[charIndex - 1] == ':';
+}
+
+std::string Expander::expandTildeInSegment(const std::string& text, bool allowColonTilde, const Word& w, std::size_t segIndex) {
+    std::string newText;
+    std::size_t i = 0;
+    const std::size_t len = text.length();
+
+    while (i < len) {
+        bool isValidPos = isValidTildePosition(w, segIndex, i);
+
+        if (allowColonTilde && isValidPos && text[i] == '~') {
+            std::size_t prefixEnd = tildePrefixEnd(text, i);
+            std::string tildeUser = text.substr(i + 1, prefixEnd - (i + 1));
+            std::string replacement = tildeReplacement(env_, tildeUser);
+
+            if (!replacement.empty()) {
+                newText += replacement;
+                i = prefixEnd;
+                continue;
+            }
+        }
+
+        newText += text[i];
+        i++;
+    }
+    return newText;
+}
+
+Word Expander::applyTildeExpansion(const Word& w, bool allowColonTilde) {
     Word out = w;
     if (out.segments.empty()) return out;
 
-    for (auto& seg : out.segments) {
+    for (std::size_t idx = 0; idx < out.segments.size(); ++idx) {
+        auto& seg = out.segments[idx];
         if (seg.kind != WordSegment::Kind::Literal) continue;
         if (seg.text.empty()) continue;
 
-        std::string newText;
-        std::size_t i = 0;
-        const std::string& text = seg.text;
-        const std::size_t len = text.length();
+        if (seg.text.find('~') == std::string::npos) continue;
 
-        while (i < len) {
-            bool isStartOrAfterColon = (i == 0 || text[i - 1] == ':');
+        std::string updatedText = expandTildeInSegment(seg.text, allowColonTilde, out, idx);
 
-            if (isStartOrAfterColon && text[i] == '~') {
-                std::size_t prefixEnd = tildePrefixEnd(text.substr(i));
-                std::string tildeUser = text.substr(i + 1, prefixEnd - 1);
-                std::string replacement = tildeReplacement(env_, tildeUser);
-
-                if (!replacement.empty()) {
-                    newText += replacement;
-                    i += prefixEnd;
-                    continue;
-                }
-            }
-
-            newText += text[i];
-            i++;
+		if (updatedText != seg.text) {
+            seg.text = std::move(updatedText);
         }
-
-        seg.text = newText;
     }
 
     return out;
